@@ -10,6 +10,7 @@ use alloc::{
     vec::Vec,
 };
 use core::convert::{From, TryInto};
+use core::fmt::Write;
 use wire::keymint::ErrorCode;
 
 /// Re-export of crate used for CBOR encoding.
@@ -18,6 +19,7 @@ pub use ciborium as cbor;
 pub use coset;
 
 pub mod crypto;
+pub mod tag;
 pub mod wire;
 
 /// General error type.
@@ -470,7 +472,7 @@ macro_rules! expect_err {
 pub fn hex_encode(data: &[u8]) -> String {
     let mut result = String::new();
     for byte in data {
-        result += &format!("{:02x}", byte);
+        let _ =  &write!(result, "{:02x}", byte);
     }
     result
 }
