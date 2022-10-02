@@ -39,8 +39,6 @@ pub const KEYSTORE_ENFORCED_TAGS: &[Tag] = &[
     Tag::ActiveDatetime,
     Tag::OriginationExpireDatetime,
     Tag::UsageExpireDatetime,
-    // A usage count limit of 1 can be enforced by KeyMint if it has secure storage available.
-    Tag::UsageCountLimit,
     Tag::UserId,
     Tag::AllowWhileOnBody,
     Tag::CreationDatetime,
@@ -459,7 +457,7 @@ const INFO: [(Tag, Info); 59] = [
             tt: TagType::Uint,
             ext_asn1_type: Some("INTEGER"),
             user_can_specify: UserSpecifiable(true),
-            characteristic: Characteristic::KeystoreEnforced,
+            characteristic: Characteristic::BothEnforced,
             op_param: OperationParam::NotOperationParam,
             keymint_auto_adds: AutoAddedCharacteristic(false),
             lifetime: ValueLifetime::Variable,
