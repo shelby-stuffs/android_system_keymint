@@ -1,6 +1,8 @@
 //! Key blob manipulation functionality.
 
-use crate::{contains_tag_value, crypto, km_err, try_to_vec, vec_try, Error, FallibleAllocExt};
+use crate::{
+    contains_tag_value, crypto, km_err, tag, try_to_vec, vec_try, Error, FallibleAllocExt,
+};
 use alloc::{
     format,
     string::{String, ToString},
@@ -52,6 +54,11 @@ impl EncryptedKeyBlob {
             EncryptedKeyBlob::V1(blob) => blob.secure_deletion_slot,
         }
     }
+    pub fn kek_context(&self) -> &[u8] {
+        match self {
+            EncryptedKeyBlob::V1(blob) => &blob.kek_context,
+        }
+    }
 }
 
 impl AsCborValue for EncryptedKeyBlob {
@@ -95,6 +102,8 @@ pub struct EncryptedKeyBlobV1 {
     pub characteristics: Vec<KeyCharacteristics>,
     /// Nonce used for the key derivation.
     pub key_derivation_input: [u8; 32],
+    /// Opaque context data needed for root KEK retrieval.
+    pub kek_context: Vec<u8>,
     /// Key material encrypted with AES-GCM with:
     ///  - key produced by [`derive_kek`]
     ///  - plaintext is the CBOR-serialization of [`crypto::KeyMaterial`]
@@ -228,31 +237,10 @@ pub struct PlaintextKeyBlob {
     pub key_material: crypto::KeyMaterial,
 }
 
-/// Return the set of key parameters at the provided security level.
-pub fn characteristics_at(
-    chars: &[KeyCharacteristics],
-    sec_level: SecurityLevel,
-) -> Result<&[KeyParam], Error> {
-    let mut result: Option<&[KeyParam]> = None;
-    for chars in chars {
-        if chars.security_level != sec_level {
-            continue;
-        }
-        if result.is_none() {
-            result = Some(&chars.authorizations);
-        } else {
-            return Err(km_err!(InvalidKeyBlob, "multiple key characteristics at {:?}", sec_level));
-        }
-    }
-    result.ok_or_else(|| {
-        km_err!(InvalidKeyBlob, "no parameters at security level {:?} found", sec_level)
-    })
-}
-
 impl PlaintextKeyBlob {
     /// Return the set of key parameters at the provided security level.
     pub fn characteristics_at(&self, sec_level: SecurityLevel) -> Result<&[KeyParam], Error> {
-        characteristics_at(&self.characteristics, sec_level)
+        tag::characteristics_at(&self.characteristics, sec_level)
     }
 
     /// Check that the key is suitable for the given purpose.
@@ -275,6 +263,7 @@ pub fn encrypt(
     kdf: &dyn crypto::Hkdf,
     rng: &mut dyn crypto::Rng,
     root_key: &crypto::RawKeyMaterial,
+    kek_context: &[u8],
     plaintext_keyblob: PlaintextKeyBlob,
     hidden: Vec<KeyParam>,
 ) -> Result<EncryptedKeyBlob, Error> {
@@ -336,6 +325,7 @@ pub fn encrypt(
     Ok(EncryptedKeyBlob::V1(EncryptedKeyBlobV1 {
         characteristics,
         key_derivation_input,
+        kek_context: try_to_vec(kek_context)?,
         encrypted_key_material: cose_encrypt,
         secure_deletion_slot: slot_holder.map(|h| h.consume()),
     }))
