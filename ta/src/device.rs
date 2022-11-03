@@ -2,9 +2,11 @@
 
 use alloc::vec::Vec;
 use kmr_common::{
-    crypto, crypto::aes, crypto::KeyMaterial, crypto::RawKeyMaterial, keyblob, km_err, Error,
+    crypto, crypto::aes, crypto::KeyMaterial, crypto::RawKeyMaterial, keyblob, km_err, log_unimpl,
+    unimpl, Error,
 };
 use kmr_wire::keymint;
+use log::error;
 
 /// Combined collection of trait implementations that must be provided.
 pub struct Implementation<'a> {
@@ -37,23 +39,23 @@ pub struct Implementation<'a> {
 pub trait RetrieveKeyMaterial {
     /// Retrieve the root key used for derivation of a per-keyblob key encryption key (KEK), passing
     /// in any opaque context.
-    fn root_kek(&self, context: &[u8]) -> RawKeyMaterial;
+    fn root_kek(&self, context: &[u8]) -> Result<RawKeyMaterial, Error>;
 
     /// Retrieve any opaque (but non-confidential) context needed for future calls to [`root_kek`].
     /// Context should not include confidential data (it will be stored in the clear).
-    fn kek_context(&self) -> Vec<u8> {
+    fn kek_context(&self) -> Result<Vec<u8>, Error> {
         // Default implementation is to have an empty KEK retrieval context.
-        Vec::new()
+        Ok(Vec::new())
     }
 
     /// Retrieve the key agreement key used for shared secret negotiation.
-    fn kak(&self) -> aes::Key;
+    fn kak(&self) -> Result<aes::Key, Error>;
 
     /// Retrieve the hardware backed secret used for UNIQUE_ID generation.
     fn unique_id_hbk(&self, ckdf: Option<&dyn crypto::Ckdf>) -> Result<crypto::hmac::Key, Error> {
         if let Some(ckdf) = ckdf {
             let unique_id_label = b"UniqueID HBK 32B";
-            ckdf.ckdf(&self.kak().into(), unique_id_label, &[], 32).map(crypto::hmac::Key::new)
+            ckdf.ckdf(&self.kak()?.into(), unique_id_label, &[], 32).map(crypto::hmac::Key::new)
         } else {
             Err(km_err!(Unimplemented, "default impl requires ckdf implementation"))
         }
@@ -124,7 +126,7 @@ pub trait BootloaderStatus {
 
 /// Marker implementation for implementations that do not support `BOOTLOADER_ONLY` keys, which
 /// always indicates that bootloader processing is complete.
-struct BootloaderDone;
+pub struct BootloaderDone;
 impl BootloaderStatus for BootloaderDone {}
 
 /// Trusted user presence indicator.
@@ -145,4 +147,28 @@ impl TrustedUserPresence for TrustedPresenceUnsupported {}
 pub trait StorageKeyWrapper {
     /// Wrap the provided key material using an ephemeral storage key.
     fn ephemeral_wrap(&self, key_material: &KeyMaterial) -> Result<Vec<u8>, Error>;
+}
+
+// No-op implementations for the non-optional device traits. These implementations are only
+// intended for convenience during the process of porting the KeyMint code to a new environment.
+pub struct NoOpRetrieveKeyMaterial;
+impl RetrieveKeyMaterial for NoOpRetrieveKeyMaterial {
+    fn root_kek(&self, _context: &[u8]) -> Result<RawKeyMaterial, Error> {
+        unimpl!();
+    }
+
+    fn kak(&self) -> Result<aes::Key, Error> {
+        unimpl!();
+    }
+}
+
+pub struct NoOpRetrieveCertSigningInfo;
+impl RetrieveCertSigningInfo for NoOpRetrieveCertSigningInfo {
+    fn signing_key(&self, _key_type: SigningKeyType) -> Result<KeyMaterial, Error> {
+        unimpl!();
+    }
+
+    fn cert_chain(&self, _key_type: SigningKeyType) -> Result<Vec<keymint::Certificate>, Error> {
+        unimpl!();
+    }
 }
