@@ -1,6 +1,8 @@
 //! Key blob manipulation functionality.
 
-use crate::{contains_tag_value, crypto, km_err, try_to_vec, vec_try, Error, FallibleAllocExt};
+use crate::{
+    contains_tag_value, crypto, km_err, tag, try_to_vec, vec_try, Error, FallibleAllocExt,
+};
 use alloc::{
     format,
     string::{String, ToString},
@@ -8,7 +10,7 @@ use alloc::{
 };
 use kmr_derive::AsCborValue;
 use kmr_wire::keymint::{
-    KeyCharacteristics, KeyParam, KeyPurpose, SecurityLevel, VerifiedBootState,
+    BootInfo, KeyCharacteristics, KeyParam, KeyPurpose, SecurityLevel, VerifiedBootState,
 };
 use kmr_wire::{cbor, cbor_type_error, AsCborValue, CborError};
 use log::error;
@@ -50,6 +52,11 @@ impl EncryptedKeyBlob {
     pub fn secure_deletion_slot(&self) -> Option<SecureDeletionSlot> {
         match self {
             EncryptedKeyBlob::V1(blob) => blob.secure_deletion_slot,
+        }
+    }
+    pub fn kek_context(&self) -> &[u8] {
+        match self {
+            EncryptedKeyBlob::V1(blob) => &blob.kek_context,
         }
     }
 }
@@ -95,6 +102,8 @@ pub struct EncryptedKeyBlobV1 {
     pub characteristics: Vec<KeyCharacteristics>,
     /// Nonce used for the key derivation.
     pub key_derivation_input: [u8; 32],
+    /// Opaque context data needed for root KEK retrieval.
+    pub kek_context: Vec<u8>,
     /// Key material encrypted with AES-GCM with:
     ///  - key produced by [`derive_kek`]
     ///  - plaintext is the CBOR-serialization of [`crypto::KeyMaterial`]
@@ -104,6 +113,22 @@ pub struct EncryptedKeyBlobV1 {
     /// Identifier for a slot in secure storage that holds additional secret values
     /// that are required to derive the key encryption key.
     pub secure_deletion_slot: Option<SecureDeletionSlot>,
+}
+
+/// Trait to handle keyblobs in a format from a previous implementation.
+pub trait LegacyKeyHandler {
+    /// Indicate whether a keyblob is a legacy key format.
+    fn is_legacy_key(&self, keyblob: &[u8], params: &[KeyParam], root_of_trust: &BootInfo) -> bool;
+
+    /// Convert a legacy key (for which [`is_legacy_key`] returned true) into current format.
+    /// This method should destroy any secure deletion data associated with the key.
+    fn convert_legacy_key(
+        &mut self,
+        keyblob: &[u8],
+        params: &[KeyParam],
+        root_of_trust: &BootInfo,
+        sec_level: SecurityLevel,
+    ) -> Result<PlaintextKeyBlob, Error>;
 }
 
 /// Secret data that can be mixed into the key derivation inputs for keys; if the secret data is
@@ -228,31 +253,10 @@ pub struct PlaintextKeyBlob {
     pub key_material: crypto::KeyMaterial,
 }
 
-/// Return the set of key parameters at the provided security level.
-pub fn characteristics_at(
-    chars: &[KeyCharacteristics],
-    sec_level: SecurityLevel,
-) -> Result<&[KeyParam], Error> {
-    let mut result: Option<&[KeyParam]> = None;
-    for chars in chars {
-        if chars.security_level != sec_level {
-            continue;
-        }
-        if result.is_none() {
-            result = Some(&chars.authorizations);
-        } else {
-            return Err(km_err!(InvalidKeyBlob, "multiple key characteristics at {:?}", sec_level));
-        }
-    }
-    result.ok_or_else(|| {
-        km_err!(InvalidKeyBlob, "no parameters at security level {:?} found", sec_level)
-    })
-}
-
 impl PlaintextKeyBlob {
     /// Return the set of key parameters at the provided security level.
     pub fn characteristics_at(&self, sec_level: SecurityLevel) -> Result<&[KeyParam], Error> {
-        characteristics_at(&self.characteristics, sec_level)
+        tag::characteristics_at(&self.characteristics, sec_level)
     }
 
     /// Check that the key is suitable for the given purpose.
@@ -275,6 +279,7 @@ pub fn encrypt(
     kdf: &dyn crypto::Hkdf,
     rng: &mut dyn crypto::Rng,
     root_key: &crypto::RawKeyMaterial,
+    kek_context: &[u8],
     plaintext_keyblob: PlaintextKeyBlob,
     hidden: Vec<KeyParam>,
 ) -> Result<EncryptedKeyBlob, Error> {
@@ -336,6 +341,7 @@ pub fn encrypt(
     Ok(EncryptedKeyBlob::V1(EncryptedKeyBlobV1 {
         characteristics,
         key_derivation_input,
+        kek_context: try_to_vec(kek_context)?,
         encrypted_key_material: cose_encrypt,
         secure_deletion_slot: slot_holder.map(|h| h.consume()),
     }))

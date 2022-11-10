@@ -3,21 +3,15 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::{
-    format,
-    rc::Rc,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, rc::Rc, string::ToString, vec::Vec};
 use core::cmp::Ordering;
 use core::mem::size_of;
 use core::{cell::RefCell, convert::TryFrom};
 use kmr_common::{
     crypto::{self, RawKeyMaterial},
-    keyblob::{self, RootOfTrustInfo},
+    keyblob::{self, RootOfTrustInfo, SecureDeletionSlot},
     km_err, tag, vec_try, vec_try_with_capacity, Error, FallibleAllocExt,
 };
-use kmr_derive::AsCborValue;
 use kmr_wire::{
     coset::TaggedCborSerializable,
     keymint::{
@@ -59,6 +53,15 @@ struct UseCount {
     count: u64,
 }
 
+/// Attestation chain information.
+struct AttestationChainInfo {
+    /// Chain of certificates from intermediate to root.
+    chain: Vec<keymint::Certificate>,
+    /// Subject field from the first certificate in the chain, as an ASN.1 DER encoded `Name` (cf
+    /// RFC 5280 s4.1.2.4).
+    issuer: Vec<u8>,
+}
+
 /// KeyMint device implementation, running in secure environment.
 pub struct KeyMintTa<'a> {
     /**
@@ -83,20 +86,14 @@ pub struct KeyMintTa<'a> {
     shared_secret_params: Option<SharedSecretParameters>,
 
     /// Information provided by the bootloader once at start of day.
-    boot_info: Option<BootInfo>,
+    boot_info: Option<keymint::BootInfo>,
     rot_data: Option<Vec<u8>>,
 
     /// Information provided by the HAL service once at start of day.
     hal_info: Option<HalInfo>,
 
     /// Attestation chain information, retrieved on first use.
-    batch_chain: RefCell<Option<Vec<keymint::Certificate>>>,
-    device_unique_chain: RefCell<Option<Vec<keymint::Certificate>>>,
-
-    /// Subject field from the first certificate in the chain, as an ASN.1 DER encoded `Name` (cf
-    /// RFC 5280 s4.1.2.4); retrieved on first use.
-    batch_issuer: RefCell<Option<Vec<u8>>>,
-    device_unique_issuer: RefCell<Option<Vec<u8>>>,
+    attestation_chain_info: RefCell<BTreeMap<device::SigningKeyType, AttestationChainInfo>>,
 
     /// Attestation ID information, fixed forever for a device, but retrieved on first use.
     attestation_id_info: RefCell<Option<Rc<AttestationIdInfo>>>,
@@ -155,33 +152,6 @@ pub struct HardwareInfo {
     pub fused: bool, // Used as `DeviceInfo.fused` for RKP
 }
 
-/// Information provided once at start-of-day, normally by the bootloader.
-///
-/// Field order is fixed, to match the CBOR type definition of `RootOfTrust` in `IKeyMintDevice`.
-#[derive(Clone, Debug, AsCborValue, PartialEq, Eq)]
-pub struct BootInfo {
-    pub verified_boot_key: [u8; 32],
-    pub device_boot_locked: bool,
-    pub verified_boot_state: VerifiedBootState,
-    pub verified_boot_hash: [u8; 32],
-    pub boot_patchlevel: u32, // YYYYMMDD format
-}
-
-// Implement the `coset` CBOR serialization traits in terms of the local `AsCborValue` trait,
-// in order to get access to tagged versions of serialize/deserialize.
-impl coset::AsCborValue for BootInfo {
-    fn from_cbor_value(value: cbor::value::Value) -> coset::Result<Self> {
-        <Self as AsCborValue>::from_cbor_value(value).map_err(|e| e.into())
-    }
-    fn to_cbor_value(self) -> coset::Result<cbor::value::Value> {
-        <Self as AsCborValue>::to_cbor_value(self).map_err(|e| e.into())
-    }
-}
-
-impl TaggedCborSerializable for BootInfo {
-    const TAG: u64 = 40001;
-}
-
 /// Information provided once at service start by the HAL service, describing
 /// the state of the userspace operating system (which may change from boot to
 /// boot, e.g. for running GSI).
@@ -212,7 +182,8 @@ impl<'a> KeyMintTa<'a> {
             imp,
             dev,
             in_early_boot: true,
-            // TODO: figure out whether an initial locked state is possible
+            // Note: Keystore currently doesn't trigger the `deviceLocked()` KeyMint entrypoint,
+            // so treat the device as not-locked at start-of-day.
             device_locked: RefCell::new(LockState::Unlocked),
             hmac_key: None,
             rot_challenge: [0; 16],
@@ -225,10 +196,7 @@ impl<'a> KeyMintTa<'a> {
             boot_info: None,
             rot_data: None,
             hal_info: None,
-            batch_chain: RefCell::new(None),
-            device_unique_chain: RefCell::new(None),
-            batch_issuer: RefCell::new(None),
-            device_unique_issuer: RefCell::new(None),
+            attestation_chain_info: RefCell::new(BTreeMap::new()),
             attestation_id_info: RefCell::new(None),
         }
     }
@@ -247,13 +215,47 @@ impl<'a> KeyMintTa<'a> {
         }
     }
 
+    /// Return the device's boot information.
+    fn boot_info(&self) -> Result<&keymint::BootInfo, Error> {
+        self.boot_info
+            .as_ref()
+            .ok_or_else(|| km_err!(HardwareNotYetAvailable, "no boot info available"))
+    }
+
+    /// Parse and decrypt an encrypted key blob.
+    fn keyblob_parse_decrypt(
+        &self,
+        key_blob: &[u8],
+        params: &[KeyParam],
+    ) -> Result<(keyblob::PlaintextKeyBlob, Option<SecureDeletionSlot>), Error> {
+        let encrypted_keyblob = match keyblob::EncryptedKeyBlob::new(key_blob) {
+            Ok(k) => k,
+            Err(e) => {
+                // We might have failed to parse the keyblob because it is in some prior format.
+                if let Some(old_key) = self.dev.legacy_key.as_ref() {
+                    if old_key.is_legacy_key(key_blob, params, self.boot_info()?) {
+                        return Err(km_err!(
+                            KeyRequiresUpgrade,
+                            "legacy key detected, request upgrade"
+                        ));
+                    }
+                }
+                return Err(e);
+            }
+        };
+        let hidden = tag::hidden(params, self.root_of_trust()?)?;
+        let sdd_slot = encrypted_keyblob.secure_deletion_slot();
+        let keyblob = self.keyblob_decrypt(encrypted_keyblob, hidden)?;
+        Ok((keyblob, sdd_slot))
+    }
+
     /// Decrypt an encrypted key blob.
     fn keyblob_decrypt(
         &self,
         encrypted_keyblob: keyblob::EncryptedKeyBlob,
         hidden: Vec<KeyParam>,
     ) -> Result<keyblob::PlaintextKeyBlob, Error> {
-        let root_kek = self.root_kek();
+        let root_kek = self.root_kek(encrypted_keyblob.kek_context())?;
         let keyblob = keyblob::decrypt(
             match &self.dev.sdd_mgr {
                 None => None,
@@ -391,7 +393,7 @@ impl<'a> KeyMintTa<'a> {
     /// Configure the boot-specific root of trust info.  KeyMint implementors should call this
     /// method when this information arrives from the bootloader (which happens in an
     /// implementation-specific manner).
-    pub fn set_boot_info(&mut self, boot_info: BootInfo) {
+    pub fn set_boot_info(&mut self, boot_info: keymint::BootInfo) {
         if !self.in_early_boot {
             error!("Rejecting attempt to set boot info {:?} after early boot", boot_info);
         }
@@ -493,7 +495,7 @@ impl<'a> KeyMintTa<'a> {
                     Ok(state) => state,
                     Err(e) => return op_error_rsp(SetBootInfoRequest::CODE, Error::Cbor(e)),
                 };
-                self.set_boot_info(BootInfo {
+                self.set_boot_info(keymint::BootInfo {
                     verified_boot_key: req.verified_boot_key,
                     device_boot_locked: req.device_boot_locked,
                     verified_boot_state,
@@ -937,14 +939,11 @@ impl<'a> KeyMintTa<'a> {
         if self.is_strongbox() {
             return Err(km_err!(Unimplemented, "root-of-trust retrieval not for StrongBox"));
         }
-        let payload = if let Some(info) = &self.boot_info {
-            info.clone()
-                .to_tagged_vec()
-                .map_err(|_e| km_err!(UnknownError, "Failed to CBOR-encode RootOfTrust"))
-        } else {
-            error!("RootOfTrust not known!");
-            Err(km_err!(HardwareNotYetAvailable, "root-of-trust unavailable"))
-        }?;
+        let payload = self
+            .boot_info()?
+            .clone()
+            .to_tagged_vec()
+            .map_err(|_e| km_err!(UnknownError, "Failed to CBOR-encode RootOfTrust"))?;
 
         let mac0 = coset::CoseMac0Builder::new()
             .protected(
@@ -974,7 +973,7 @@ impl<'a> KeyMintTa<'a> {
         })?;
         let payload =
             mac0.payload.ok_or_else(|| km_err!(InvalidArgument, "Missing payload in CoseMac0"))?;
-        let boot_info = BootInfo::from_tagged_slice(&payload)
+        let boot_info = keymint::BootInfo::from_tagged_slice(&payload)
             .map_err(|_e| km_err!(InvalidArgument, "Failed to CBOR-decode RootOfTrust"))?;
         if self.boot_info.is_none() {
             info!("Setting boot_info to TEE-provided {:?}", boot_info);
@@ -989,9 +988,7 @@ impl<'a> KeyMintTa<'a> {
         if let Some(sk_wrapper) = self.dev.sk_wrapper {
             // Parse and decrypt the keyblob. Note that there is no way to provide extra hidden
             // params on the API.
-            let encrypted_keyblob = keyblob::EncryptedKeyBlob::new(keyblob)?;
-            let hidden = tag::hidden(&[], self.root_of_trust()?)?;
-            let keyblob = self.keyblob_decrypt(encrypted_keyblob, hidden)?;
+            let (keyblob, _) = self.keyblob_parse_decrypt(keyblob, &[])?;
 
             // Now that we've got the key material, use a device-specific method to re-wrap it
             // with an ephemeral key.
@@ -1008,7 +1005,6 @@ impl<'a> KeyMintTa<'a> {
         app_data: Vec<u8>,
     ) -> Result<Vec<KeyCharacteristics>, Error> {
         // Parse and decrypt the keyblob, which requires extra hidden params.
-        let encrypted_keyblob = keyblob::EncryptedKeyBlob::new(key_blob)?;
         let mut params = vec_try_with_capacity!(2)?;
         if !app_id.is_empty() {
             params.push(KeyParam::ApplicationId(app_id)); // capacity enough
@@ -1016,8 +1012,7 @@ impl<'a> KeyMintTa<'a> {
         if !app_data.is_empty() {
             params.push(KeyParam::ApplicationData(app_data)); // capacity enough
         }
-        let hidden = tag::hidden(&params, self.root_of_trust()?)?;
-        let keyblob = self.keyblob_decrypt(encrypted_keyblob, hidden)?;
+        let (keyblob, _) = self.keyblob_parse_decrypt(key_blob, &params)?;
         Ok(keyblob.characteristics)
     }
 
@@ -1051,8 +1046,8 @@ impl<'a> KeyMintTa<'a> {
     }
 
     /// Return the root key used for key encryption.
-    fn root_kek(&self) -> RawKeyMaterial {
-        self.dev.keys.root_kek()
+    fn root_kek(&self, context: &[u8]) -> Result<RawKeyMaterial, Error> {
+        self.dev.keys.root_kek(context)
     }
 
     /// Add KeyMint-generated tags to the provided [`KeyCharacteristics`].

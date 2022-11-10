@@ -17,7 +17,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use enumn::N;
-use kmr_derive::AsCborValue;
+use kmr_derive::{AsCborValue, FromRawTag};
 
 /// Default certificate serial number of 1.
 pub const DEFAULT_CERT_SERIAL: &[u8] = &[0x01];
@@ -48,6 +48,33 @@ impl TryFrom<i32> for VerifiedBootState {
     fn try_from(v: i32) -> Result<Self, Self::Error> {
         Self::n(v).ok_or(CborError::OutOfRangeIntegerValue)
     }
+}
+
+/// Information provided once at start-of-day, normally by the bootloader.
+///
+/// Field order is fixed, to match the CBOR type definition of `RootOfTrust` in `IKeyMintDevice`.
+#[derive(Clone, Debug, AsCborValue, PartialEq, Eq)]
+pub struct BootInfo {
+    pub verified_boot_key: [u8; 32],
+    pub device_boot_locked: bool,
+    pub verified_boot_state: VerifiedBootState,
+    pub verified_boot_hash: [u8; 32],
+    pub boot_patchlevel: u32, // YYYYMMDD format
+}
+
+// Implement the `coset` CBOR serialization traits in terms of the local `AsCborValue` trait,
+// in order to get access to tagged versions of serialize/deserialize.
+impl coset::AsCborValue for BootInfo {
+    fn from_cbor_value(value: cbor::value::Value) -> coset::Result<Self> {
+        <Self as AsCborValue>::from_cbor_value(value).map_err(|e| e.into())
+    }
+    fn to_cbor_value(self) -> coset::Result<cbor::value::Value> {
+        <Self as AsCborValue>::to_cbor_value(self).map_err(|e| e.into())
+    }
+}
+
+impl coset::TaggedCborSerializable for BootInfo {
+    const TAG: u64 = 40001;
 }
 
 /// Representation of a date/time.
@@ -930,75 +957,6 @@ pub fn raw_tag_value(tag: Tag) -> u32 {
     (tag as u32) & 0x0fffffffu32
 }
 
-pub fn from_raw_tag_value(raw_tag: u32) -> Tag {
-    match raw_tag {
-        x if x == raw_tag_value(Tag::Purpose) => Tag::Purpose,
-        x if x == raw_tag_value(Tag::Algorithm) => Tag::Algorithm,
-        x if x == raw_tag_value(Tag::KeySize) => Tag::KeySize,
-        x if x == raw_tag_value(Tag::BlockMode) => Tag::BlockMode,
-        x if x == raw_tag_value(Tag::Digest) => Tag::Digest,
-        x if x == raw_tag_value(Tag::Padding) => Tag::Padding,
-        x if x == raw_tag_value(Tag::CallerNonce) => Tag::CallerNonce,
-        x if x == raw_tag_value(Tag::MinMacLength) => Tag::MinMacLength,
-        x if x == raw_tag_value(Tag::EcCurve) => Tag::EcCurve,
-        x if x == raw_tag_value(Tag::RsaPublicExponent) => Tag::RsaPublicExponent,
-        x if x == raw_tag_value(Tag::IncludeUniqueId) => Tag::IncludeUniqueId,
-        x if x == raw_tag_value(Tag::RsaOaepMgfDigest) => Tag::RsaOaepMgfDigest,
-        x if x == raw_tag_value(Tag::BootloaderOnly) => Tag::BootloaderOnly,
-        x if x == raw_tag_value(Tag::RollbackResistance) => Tag::RollbackResistance,
-        x if x == raw_tag_value(Tag::HardwareType) => Tag::HardwareType,
-        x if x == raw_tag_value(Tag::EarlyBootOnly) => Tag::EarlyBootOnly,
-        x if x == raw_tag_value(Tag::ActiveDatetime) => Tag::ActiveDatetime,
-        x if x == raw_tag_value(Tag::OriginationExpireDatetime) => Tag::OriginationExpireDatetime,
-        x if x == raw_tag_value(Tag::UsageExpireDatetime) => Tag::UsageExpireDatetime,
-        x if x == raw_tag_value(Tag::MinSecondsBetweenOps) => Tag::MinSecondsBetweenOps,
-        x if x == raw_tag_value(Tag::MaxUsesPerBoot) => Tag::MaxUsesPerBoot,
-        x if x == raw_tag_value(Tag::UsageCountLimit) => Tag::UsageCountLimit,
-        x if x == raw_tag_value(Tag::UserId) => Tag::UserId,
-        x if x == raw_tag_value(Tag::UserSecureId) => Tag::UserSecureId,
-        x if x == raw_tag_value(Tag::NoAuthRequired) => Tag::NoAuthRequired,
-        x if x == raw_tag_value(Tag::UserAuthType) => Tag::UserAuthType,
-        x if x == raw_tag_value(Tag::AuthTimeout) => Tag::AuthTimeout,
-        x if x == raw_tag_value(Tag::AllowWhileOnBody) => Tag::AllowWhileOnBody,
-        x if x == raw_tag_value(Tag::TrustedUserPresenceRequired) => {
-            Tag::TrustedUserPresenceRequired
-        }
-        x if x == raw_tag_value(Tag::TrustedConfirmationRequired) => {
-            Tag::TrustedConfirmationRequired
-        }
-        x if x == raw_tag_value(Tag::UnlockedDeviceRequired) => Tag::UnlockedDeviceRequired,
-        x if x == raw_tag_value(Tag::ApplicationId) => Tag::ApplicationData,
-        x if x == raw_tag_value(Tag::CreationDatetime) => Tag::CreationDatetime,
-        x if x == raw_tag_value(Tag::Origin) => Tag::Origin,
-        x if x == raw_tag_value(Tag::RootOfTrust) => Tag::RootOfTrust,
-        x if x == raw_tag_value(Tag::OsVersion) => Tag::OsVersion,
-        x if x == raw_tag_value(Tag::OsPatchlevel) => Tag::OsPatchlevel,
-        x if x == raw_tag_value(Tag::AttestationChallenge) => Tag::AttestationChallenge,
-        x if x == raw_tag_value(Tag::AttestationApplicationId) => Tag::AttestationApplicationId,
-        x if x == raw_tag_value(Tag::AttestationIdBrand) => Tag::AttestationIdBrand,
-        x if x == raw_tag_value(Tag::AttestationIdDevice) => Tag::AttestationIdDevice,
-        x if x == raw_tag_value(Tag::AttestationIdProduct) => Tag::AttestationIdProduct,
-        x if x == raw_tag_value(Tag::AttestationIdSerial) => Tag::AttestationIdSerial,
-        x if x == raw_tag_value(Tag::AttestationIdImei) => Tag::AttestationIdImei,
-        x if x == raw_tag_value(Tag::AttestationIdMeid) => Tag::AttestationIdMeid,
-        x if x == raw_tag_value(Tag::AttestationIdManufacturer) => Tag::AttestationIdManufacturer,
-        x if x == raw_tag_value(Tag::AttestationIdModel) => Tag::AttestationIdModel,
-        x if x == raw_tag_value(Tag::VendorPatchlevel) => Tag::VendorPatchlevel,
-        x if x == raw_tag_value(Tag::BootPatchlevel) => Tag::BootPatchlevel,
-        x if x == raw_tag_value(Tag::DeviceUniqueAttestation) => Tag::DeviceUniqueAttestation,
-        x if x == raw_tag_value(Tag::StorageKey) => Tag::StorageKey,
-        x if x == raw_tag_value(Tag::Nonce) => Tag::Nonce,
-        x if x == raw_tag_value(Tag::MacLength) => Tag::MacLength,
-        x if x == raw_tag_value(Tag::ResetSinceIdRotation) => Tag::ResetSinceIdRotation,
-        x if x == raw_tag_value(Tag::CertificateSerial) => Tag::CertificateSerial,
-        x if x == raw_tag_value(Tag::CertificateSubject) => Tag::CertificateSubject,
-        x if x == raw_tag_value(Tag::CertificateNotBefore) => Tag::CertificateNotBefore,
-        x if x == raw_tag_value(Tag::CertificateNotAfter) => Tag::CertificateNotAfter,
-        x if x == raw_tag_value(Tag::MaxBootLevel) => Tag::MaxBootLevel,
-        _ => Tag::Invalid,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, AsCborValue, N)]
 #[repr(i32)]
 pub enum KeyPurpose {
@@ -1061,7 +1019,7 @@ pub enum SecurityLevel {
 }
 try_from_n!(SecurityLevel);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, AsCborValue, N)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, AsCborValue, FromRawTag, N)]
 #[repr(i32)]
 pub enum Tag {
     Invalid = 0,
