@@ -484,10 +484,10 @@ impl<'a> KeyMintTa<'a> {
         } else {
             info!("Setting boot_info to {:?}", boot_info);
             let rot_info = RootOfTrustInfo {
-                verified_boot_key: boot_info.verified_boot_key,
+                verified_boot_key: boot_info.verified_boot_key.clone(),
                 device_boot_locked: boot_info.device_boot_locked,
                 verified_boot_state: boot_info.verified_boot_state,
-                verified_boot_hash: boot_info.verified_boot_hash,
+                verified_boot_hash: boot_info.verified_boot_hash.clone(),
             };
             self.boot_info = Some(boot_info);
             self.rot_data =
@@ -925,8 +925,16 @@ impl<'a> KeyMintTa<'a> {
                 }
             }
         } else {
-            error!("failed to parse keyblob, ignoring");
+            // We might have failed to parse the keyblob because it is in some prior format.
+            if let Some(old_key) = self.dev.legacy_key.as_mut() {
+                if let Err(e) = old_key.delete_legacy_key(keyblob) {
+                    error!("failed to parse keyblob as legacy, ignoring");
+                }
+            } else {
+                error!("failed to parse keyblob, ignoring");
+            }
         }
+
         Ok(())
     }
 
