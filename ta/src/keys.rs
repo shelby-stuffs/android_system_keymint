@@ -218,9 +218,9 @@ impl<'a> crate::KeyMintTa<'a> {
         let mut combined_input = vec_try_with_capacity!(datetime_data.len() + app_id.len() + 1)?;
         combined_input.extend_from_slice(&datetime_data[..]);
         combined_input.extend_from_slice(app_id);
-        combined_input.push(if get_bool_tag_value!(params, ResetSinceIdRotation)? { 1 } else { 0 });
+        combined_input.push(u8::from(get_bool_tag_value!(params, ResetSinceIdRotation)?));
 
-        let hbk = self.dev.keys.unique_id_hbk(Some(self.imp.ckdf))?;
+        let hbk = self.dev.keys.unique_id_hbk(self.imp.ckdf)?;
 
         let mut hmac_op = self.imp.hmac.begin(hbk.into(), Digest::Sha256)?;
         hmac_op.update(&combined_input)?;
@@ -318,9 +318,11 @@ impl<'a> crate::KeyMintTa<'a> {
         };
         let attest_keyblob;
         let mut certificate_chain = Vec::new();
-        if let Some(spki) =
-            keyblob.key_material.subject_public_key_info(&mut Vec::<u8>::new(), self.imp.ec)?
-        {
+        if let Some(spki) = keyblob.key_material.subject_public_key_info(
+            &mut Vec::<u8>::new(),
+            self.imp.ec,
+            self.imp.rsa,
+        )? {
             // Asymmetric keys return the public key inside an X.509 certificate.
             // Need to determine:
             // - a key to sign the cert with (may be absent), together with any associated
