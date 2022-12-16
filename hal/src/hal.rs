@@ -196,14 +196,15 @@ impl Fromm<wire::rpc::ProtectedData> for keymint::ProtectedData::ProtectedData {
         Self { protectedData: val.protected_data }
     }
 }
-impl Fromm<wire::rpc::RpcHardwareInfo> for keymint::RpcHardwareInfo::RpcHardwareInfo {
-    fn fromm(val: wire::rpc::RpcHardwareInfo) -> Self {
+impl Fromm<wire::rpc::HardwareInfo> for keymint::RpcHardwareInfo::RpcHardwareInfo {
+    fn fromm(val: wire::rpc::HardwareInfo) -> Self {
         Self {
             versionNumber: val.version_number,
             rpcAuthorName: val.rpc_author_name,
             supportedEekCurve: val.supported_eek_curve as i32,
             uniqueId: val.unique_id,
-            supportedNumKeysInCsr: val.supported_num_keys_in_csr,
+            // TODO(b/259100620): Prebuilt libqtikeymint.so library may need update
+            // supportedNumKeysInCsr: val.supported_num_keys_in_csr,
         }
     }
 }
