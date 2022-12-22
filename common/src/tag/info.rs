@@ -1,10 +1,7 @@
 //! Static information about tag behaviour.
 
-use crate::{
-    km_err,
-    wire::keymint::{Tag, TagType},
-    Error,
-};
+use crate::{km_err, Error};
+use kmr_wire::keymint::{Tag, TagType};
 
 #[cfg(test)]
 mod tests;
@@ -35,17 +32,50 @@ pub enum Characteristic {
 }
 
 /// The set of characteristics that are necessarily enforced by Keystore.
-pub const KEYSTORE_ENFORCED_TAGS: &[Tag] = &[
+pub const KEYSTORE_ENFORCED_CHARACTERISTICS: &[Tag] = &[
     Tag::ActiveDatetime,
     Tag::OriginationExpireDatetime,
     Tag::UsageExpireDatetime,
-    // A usage count limit of 1 can be enforced by KeyMint if it has secure storage available.
-    Tag::UsageCountLimit,
     Tag::UserId,
     Tag::AllowWhileOnBody,
     Tag::CreationDatetime,
     Tag::MaxBootLevel,
 ];
+
+/// The set of characteristics that are enforced by KeyMint.
+pub const KEYMINT_ENFORCED_CHARACTERISTICS: &[Tag] = &[
+    Tag::UserSecureId,
+    Tag::Algorithm,
+    Tag::EcCurve,
+    Tag::UserAuthType,
+    Tag::Origin,
+    Tag::Purpose,
+    Tag::BlockMode,
+    Tag::Digest,
+    Tag::Padding,
+    Tag::RsaOaepMgfDigest,
+    Tag::KeySize,
+    Tag::MinMacLength,
+    Tag::MaxUsesPerBoot,
+    Tag::AuthTimeout,
+    Tag::OsVersion,
+    Tag::OsPatchlevel,
+    Tag::VendorPatchlevel,
+    Tag::BootPatchlevel,
+    Tag::RsaPublicExponent,
+    Tag::CallerNonce,
+    Tag::BootloaderOnly,
+    Tag::RollbackResistance,
+    Tag::EarlyBootOnly,
+    Tag::NoAuthRequired,
+    Tag::TrustedUserPresenceRequired,
+    Tag::TrustedConfirmationRequired,
+    Tag::StorageKey,
+];
+
+/// The set of characteristics that are automatically added by KeyMint on key generation.
+pub const AUTO_ADDED_CHARACTERISTICS: &[Tag] =
+    &[Tag::Origin, Tag::OsVersion, Tag::OsPatchlevel, Tag::VendorPatchlevel, Tag::BootPatchlevel];
 
 /// Indicate the allowed use of the tag as a parameter for an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +113,6 @@ pub struct UserSpecifiable(pub bool);
 /// or imported keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoAddedCharacteristic(pub bool);
-
-/// The set of tags that are automatically added by KeyMint on key generation.
-pub const AUTO_ADDED_TAGS: &[Tag] =
-    &[Tag::Origin, Tag::OsVersion, Tag::OsPatchlevel, Tag::VendorPatchlevel, Tag::BootPatchlevel];
 
 /// Indicate the lifetime of the value associated with the tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,7 +485,7 @@ const INFO: [(Tag, Info); 59] = [
             tt: TagType::Uint,
             ext_asn1_type: Some("INTEGER"),
             user_can_specify: UserSpecifiable(true),
-            characteristic: Characteristic::KeystoreEnforced,
+            characteristic: Characteristic::BothEnforced,
             op_param: OperationParam::NotOperationParam,
             keymint_auto_adds: AutoAddedCharacteristic(false),
             lifetime: ValueLifetime::Variable,
@@ -1092,7 +1118,7 @@ pub fn info(tag: Tag) -> Result<&'static Info, Error> {
 #[inline]
 pub fn multivalued(tag: Tag) -> bool {
     matches!(
-        crate::wire::keymint::tag_type(tag),
+        kmr_wire::keymint::tag_type(tag),
         TagType::EnumRep | TagType::UintRep | TagType::UlongRep
     )
 }

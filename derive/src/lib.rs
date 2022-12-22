@@ -65,21 +65,28 @@ fn to_val_struct(data: &Data) -> TokenStream {
                 Fields::Named(ref fields) => {
                     // Expands to an expression like
                     //
-                    //     Ok(ciborium::value::Value::Array(vec![
-                    //         self.x.to_cbor_value()?,
-                    //         self.y.to_cbor_value()?,
-                    //         self.z.to_cbor_value()?,
-                    //     ]))
-                    //
-                    // but using fully qualified function call syntax.
+                    //     {
+                    //         let mut v = Vec::new();
+                    //         v.try_reserve(3).map_err(|_e| CborError::AllocationFailed)?;
+                    //         v.push(AsCborValue::to_cbor_value(self.x)?);
+                    //         v.push(AsCborValue::to_cbor_value(self.y)?);
+                    //         v.push(AsCborValue::to_cbor_value(self.z)?);
+                    //         Ok(ciborium::value::Value::Array(v))
+                    //     }
+                    let nfields = fields.named.len();
                     let recurse = fields.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {f.span()=>
-                            AsCborValue::to_cbor_value(self.#name)?
+                            v.push(AsCborValue::to_cbor_value(self.#name)?)
                         }
                     });
                     quote! {
-                        Ok(ciborium::value::Value::Array(vec![ #(#recurse, )* ]))
+                        {
+                            let mut v = Vec::new();
+                            v.try_reserve(#nfields).map_err(|_e| CborError::AllocationFailed)?;
+                            #(#recurse; )*
+                            Ok(ciborium::value::Value::Array(v))
+                        }
                     }
                 }
                 Fields::Unnamed(ref fields) if fields.unnamed.len() == 1 => {
@@ -93,20 +100,29 @@ fn to_val_struct(data: &Data) -> TokenStream {
                 Fields::Unnamed(ref fields) => {
                     // Expands to an expression like
                     //
-                    //     Ok(ciborium::value::Value::Array(vec![
-                    //         self.0.to_cbor_value()?,
-                    //         self.1.to_cbor_value()?,
-                    //         self.2.to_cbor_value()?,
-                    //     ]))
                     //
+                    //     {
+                    //         let mut v = Vec::new();
+                    //         v.try_reserve(3).map_err(|_e| CborError::AllocationFailed)?;
+                    //         v.push(AsCborValue::to_cbor_value(self.0)?);
+                    //         v.push(AsCborValue::to_cbor_value(self.1)?);
+                    //         v.push(AsCborValue::to_cbor_value(self.2)?);
+                    //         Ok(ciborium::value::Value::Array(v))
+                    //     }
+                    let nfields = fields.unnamed.len();
                     let recurse = fields.unnamed.iter().enumerate().map(|(i, f)| {
                         let index = Index::from(i);
                         quote_spanned! {f.span()=>
-                            AsCborValue::to_cbor_value(self.#index)?
+                            v.push(AsCborValue::to_cbor_value(self.#index)?)
                         }
                     });
                     quote! {
-                        Ok(ciborium::value::Value::Array(vec![ #(#recurse, )* ]))
+                        {
+                            let mut v = Vec::new();
+                            v.try_reserve(#nfields).map_err(|_e| CborError::AllocationFailed)?;
+                            #(#recurse; )*
+                            Ok(ciborium::value::Value::Array(v))
+                        }
                     }
                 }
                 Fields::Unit => unimplemented!(),
@@ -122,7 +138,8 @@ fn to_val_struct(data: &Data) -> TokenStream {
     }
 }
 
-/// Generate an expression to convert a `ciborium::value::Value` into an instance of a compound type.
+/// Generate an expression to convert a `ciborium::value::Value` into an instance of a compound
+/// type.
 fn from_val_struct(data: &Data) -> TokenStream {
     match data {
         Data::Struct(ref data) => {
@@ -216,7 +233,9 @@ fn from_val_struct(data: &Data) -> TokenStream {
                             _ => return cbor_type_error(&value, "arr"),
                         };
                         if a.len() != #nfields {
-                            return Err(CborError::UnexpectedItem("arr", concat!("arr len ", stringify!(#nfields))));
+                            return Err(CborError::UnexpectedItem("arr",
+                                                                 concat!("arr len ",
+                                                                         stringify!(#nfields))));
                         }
                         // Fields specified in reverse order to reduce shifting.
                         #(#recurse1)*
@@ -413,5 +432,47 @@ fn cddl_struct(name: &Ident, data: &Data) -> TokenStream {
             }
         }
         Data::Union(_) => unimplemented!(),
+    }
+}
+
+/// Derive macro that implements a `from_raw_tag_value` method for the `Tag` enum.
+#[proc_macro_derive(FromRawTag)]
+pub fn derive_from_raw_tag(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    derive_from_raw_tag_internal(&input)
+}
+
+fn derive_from_raw_tag_internal(input: &DeriveInput) -> proc_macro::TokenStream {
+    let name = &input.ident;
+    let from_val = from_raw_tag(name, &input.data);
+    let expanded = quote! {
+        pub fn from_raw_tag_value(raw_tag: u32) -> #name {
+            #from_val
+        }
+    };
+    expanded.into()
+}
+
+/// Generate an expression to convert a `u32` into an instance of an fieldless enum.
+/// Assumes the existence of an `Invalid` variant as a fallback, and assumes that a
+/// `raw_tag_value` function is in scope.
+fn from_raw_tag(name: &Ident, data: &Data) -> TokenStream {
+    match data {
+        Data::Enum(enum_data) => {
+            let recurse = enum_data.variants.iter().map(|variant| {
+                let vname = &variant.ident;
+                quote_spanned! {variant.span()=>
+                                x if x == raw_tag_value(#name::#vname) => #name::#vname,
+                }
+            });
+
+            quote! {
+                match raw_tag {
+                    #(#recurse)*
+                    _ => #name::Invalid,
+                }
+            }
+        }
+        _ => unimplemented!(),
     }
 }

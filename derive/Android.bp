@@ -40,7 +40,7 @@ rust_test {
     rustlibs: [
         "libciborium",
         "libciborium_io",
-        "libkmr_common",
+        "libkmr_wire",
     ],
     proc_macros: [
         "libkmr_derive",

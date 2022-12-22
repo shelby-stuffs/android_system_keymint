@@ -1,6 +1,6 @@
 use super::*;
+use crate::expect_err;
 use crate::tag::legacy::{consume_u32, consume_u64, consume_u8, consume_vec};
-use crate::{expect_err, hex_decode};
 use alloc::vec;
 
 #[test]
@@ -92,6 +92,8 @@ fn test_serialize_encrypted_keyblob() {
                 nonce: vec![0xaa],
                 ciphertext: vec![0xbb, 0xbb],
                 tag: vec![0xcc],
+                kdf_version: None,
+                addl_info: None,
                 hw_enforced: vec![],
                 sw_enforced: vec![],
                 key_slot: None,
@@ -123,6 +125,43 @@ fn test_serialize_encrypted_keyblob() {
                 nonce: vec![0xaa],
                 ciphertext: vec![0xbb, 0xbb],
                 tag: vec![0xcc],
+                kdf_version: None,
+                addl_info: None,
+                hw_enforced: vec![],
+                sw_enforced: vec![],
+                key_slot: Some(6),
+            },
+        ),
+        (
+            concat!(
+                "03", // format
+                "01000000",
+                "aa", // nonce
+                "02000000",
+                "bbbb", // ciphertext
+                "01000000",
+                "cc",       // tag
+                "01010101", // kdf_version
+                "04040404", // addl_info
+                concat!(
+                    "00000000", // no blob data
+                    "00000000", // no params
+                    "00000000", // zero size of params
+                ),
+                concat!(
+                    "00000000", // no blob data
+                    "00000000", // no params
+                    "00000000", // zero size of params
+                ),
+                "06000000",
+            ),
+            EncryptedKeyBlob {
+                format: AuthEncryptedBlobFormat::AesGcmWithSwEnforcedVersioned,
+                nonce: vec![0xaa],
+                ciphertext: vec![0xbb, 0xbb],
+                tag: vec![0xcc],
+                kdf_version: Some(0x01010101),
+                addl_info: Some(0x04040404),
                 hw_enforced: vec![],
                 sw_enforced: vec![],
                 key_slot: Some(6),
@@ -130,10 +169,10 @@ fn test_serialize_encrypted_keyblob() {
         ),
     ];
     for (hex_data, want) in tests {
-        let data = hex_decode(hex_data).unwrap();
+        let data = hex::decode(hex_data).unwrap();
         let got = EncryptedKeyBlob::deserialize(&data).unwrap();
         assert_eq!(got, want);
-        let new_data = got.serialize();
+        let new_data = got.serialize().unwrap();
         assert_eq!(new_data, data);
     }
 }
@@ -143,7 +182,7 @@ fn test_deserialize_encrypted_keyblob_fail() {
     let tests = vec![
         (
             concat!(
-                "04", // format (invalid)
+                "09", // format (invalid)
                 "01000000",
                 "aa", // nonce
                 "02000000",
@@ -161,7 +200,7 @@ fn test_deserialize_encrypted_keyblob_fail() {
                     "00000000", // zero size of params
                 ),
             ),
-            "unexpected blob format 4",
+            "unexpected blob format 9",
         ),
         (
             concat!(
@@ -188,7 +227,7 @@ fn test_deserialize_encrypted_keyblob_fail() {
         ),
     ];
     for (hex_data, msg) in tests {
-        let data = hex_decode(hex_data).unwrap();
+        let data = hex::decode(hex_data).unwrap();
         let result = EncryptedKeyBlob::deserialize(&data);
         expect_err!(result, msg);
     }
@@ -196,7 +235,7 @@ fn test_deserialize_encrypted_keyblob_fail() {
 
 #[test]
 fn test_deserialize_encrypted_keyblob_truncated() {
-    let data = hex_decode(concat!(
+    let data = hex::decode(concat!(
         "00", // format
         "01000000",
         "aa", // nonce

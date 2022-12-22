@@ -1,28 +1,41 @@
 //! Functionality related to HMAC signing/verification.
 
-use super::{KeySizeInBits, OutputSize};
-use crate::{km_err, Error};
+use crate::{km_err, try_to_vec, Error};
 use alloc::vec::Vec;
+use kmr_wire::KeySizeInBits;
+use zeroize::ZeroizeOnDrop;
 
 /// Minimum size of an HMAC key in bits.
 pub const MIN_KEY_SIZE_BITS: usize = 64;
 
-/// Maximum size of an HMAC key in bits.
-pub const MAX_KEY_SIZE_BITS: usize = 512;
+/// Maximum size of a StrongBox HMAC key in bits.
+pub const MAX_STRONGBOX_KEY_SIZE_BITS: usize = 512;
+
+/// Maximum size of a HMAC key in bits.
+pub const MAX_KEY_SIZE_BITS: usize = 1024;
 
 /// An HMAC key.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct Key(pub Vec<u8>);
 
-/// Check that the size of an HMAC key is within the allowed size for the KeyMint HAL.
-pub fn valid_hal_size(key_size: KeySizeInBits) -> Result<(), Error> {
+fn valid_size(key_size: KeySizeInBits, max_size_bits: usize) -> Result<(), Error> {
     if key_size.0 % 8 != 0 {
         Err(km_err!(UnsupportedKeySize, "key size {} bits not a multiple of 8", key_size.0))
-    } else if !(MIN_KEY_SIZE_BITS..=MAX_KEY_SIZE_BITS).contains(&(key_size.0 as usize)) {
+    } else if !(MIN_KEY_SIZE_BITS..=max_size_bits).contains(&(key_size.0 as usize)) {
         Err(km_err!(UnsupportedKeySize, "unsupported KEY_SIZE {} bits for HMAC", key_size.0))
     } else {
         Ok(())
     }
+}
+
+/// Check that the size of an HMAC key is within the allowed size for the KeyMint HAL.
+pub fn valid_hal_size(key_size: KeySizeInBits) -> Result<(), Error> {
+    valid_size(key_size, MAX_KEY_SIZE_BITS)
+}
+
+/// Check that the size of an HMAC key is within the allowed size for a StrongBox implementation.
+pub fn valid_strongbox_hal_size(key_size: KeySizeInBits) -> Result<(), Error> {
+    valid_size(key_size, MAX_STRONGBOX_KEY_SIZE_BITS)
 }
 
 impl Key {
@@ -32,28 +45,12 @@ impl Key {
     }
 
     /// Create a new HMAC key from data.
-    pub fn new_from(data: &[u8]) -> Key {
-        Key::new(data.to_vec())
+    pub fn new_from(data: &[u8]) -> Result<Key, Error> {
+        Ok(Key::new(try_to_vec(data)?))
     }
 
     /// Indicate the size of the key in bits.
     pub fn size(&self) -> KeySizeInBits {
         KeySizeInBits((self.0.len() * 8) as u32)
-    }
-}
-
-/// Marker struct for HMAC size calculations.
-pub struct Mode {
-    tag_size: usize,
-}
-
-impl OutputSize for Mode {
-    fn update_max_output_len(&self, _input_len: usize) -> usize {
-        // Nothing output until the end.
-        0
-    }
-
-    fn finish_max_output_len(&self) -> usize {
-        self.tag_size
     }
 }

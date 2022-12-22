@@ -1,6 +1,6 @@
 DateTime = int
 KeySizeInBits = int
-Exponent = int
+RsaExponent = int
 Algorithm = &(
     Algorithm_Rsa: 1,
     Algorithm_Ec: 3,
@@ -29,6 +29,11 @@ EcCurve = &(
     EcCurve_P384: 2,
     EcCurve_P521: 3,
     EcCurve_Curve25519: 4,
+)
+CurveType = &(
+    CurveType_Nist: 0,
+    CurveType_EdDsa: 1,
+    CurveType_Xdh: 2,
 )
 ErrorCode = &(
     ErrorCode_Ok: 0,
@@ -310,7 +315,7 @@ KeyParam = &(
     [805306371, KeySizeInBits], ; Tag_KeySize
     [1879048199, bstr], ; Tag_CallerNonce
     [805306376, int], ; Tag_MinMacLength
-    [1342177480, Exponent], ; Tag_RsaPublicExponent
+    [1342177480, RsaExponent], ; Tag_RsaPublicExponent
     [1879048394, true], ; Tag_IncludeUniqueId
     [536871115, Digest], ; Tag_RsaOaepMgfDigest
     [1879048494, true], ; Tag_BootloaderOnly
@@ -381,6 +386,7 @@ KeyMintOperation = &(
     RpcGetHardwareInfo: 0x41,
     RpcGenerateEcdsaP256KeyPair: 0x42,
     RpcGenerateCertificateRequest: 0x43,
+    RpcGenerateCertificateV2Request: 0x44,
     SharedSecretGetSharedSecretParameters: 0x51,
     SharedSecretComputeSharedSecret: 0x52,
     SecureClockGenerateTimeStamp: 0x61,
@@ -389,6 +395,7 @@ KeyMintOperation = &(
     SendRootOfTrust: 0x73,
     SetHalInfo: 0x81,
     SetBootInfo: 0x82,
+    SetAttestationIds: 0x83,
 )
 GetHardwareInfoRequest = []
 GetHardwareInfoResponse = [
@@ -525,6 +532,13 @@ GenerateCertificateRequestResponse = [
     protected_data: ProtectedData,
     ret: bstr,
 ]
+GenerateCertificateRequestV2Request = [
+    keys_to_sign: [* MacedPublicKey],
+    challenge: bstr,
+]
+GenerateCertificateRequestV2Response = [
+    ret: bstr,
+]
 GetSharedSecretParametersRequest = []
 GetSharedSecretParametersResponse = [
     ret: SharedSecretParameters,
@@ -563,6 +577,7 @@ PerformOpReq = &(
     [RpcGetHardwareInfo, GetRpcHardwareInfoRequest],
     [RpcGenerateEcdsaP256KeyPair, GenerateEcdsaP256KeyPairRequest],
     [RpcGenerateCertificateRequest, GenerateCertificateRequestRequest],
+    [RpcGenerateCertificateV2Request, GenerateCertificateRequestV2Request],
     [SharedSecretGetSharedSecretParameters, GetSharedSecretParametersRequest],
     [SharedSecretComputeSharedSecret, ComputeSharedSecretRequest],
     [SecureClockGenerateTimeStamp, GenerateTimeStampRequest],
@@ -571,6 +586,7 @@ PerformOpReq = &(
     [SendRootOfTrust, SendRootOfTrustRequest],
     [SetHalInfo, SetHalInfoRequest],
     [SetBootInfo, SetBootInfoRequest],
+    [SetAttestationIds, SetAttestationIdsRequest],
 )
 PerformOpRsp = &(
     [DeviceGetHardwareInfo, GetHardwareInfoResponse],
@@ -594,6 +610,7 @@ PerformOpRsp = &(
     [RpcGetHardwareInfo, GetRpcHardwareInfoResponse],
     [RpcGenerateEcdsaP256KeyPair, GenerateEcdsaP256KeyPairResponse],
     [RpcGenerateCertificateRequest, GenerateCertificateRequestResponse],
+    [RpcGenerateCertificateV2Request, GenerateCertificateRequestV2Response],
     [SharedSecretGetSharedSecretParameters, GetSharedSecretParametersResponse],
     [SharedSecretComputeSharedSecret, ComputeSharedSecretResponse],
     [SecureClockGenerateTimeStamp, GenerateTimeStampResponse],
@@ -602,6 +619,7 @@ PerformOpRsp = &(
     [SendRootOfTrust, SendRootOfTrustResponse],
     [SetHalInfo, SetHalInfoResponse],
     [SetBootInfo, SetBootInfoResponse],
+    [SetAttestationIds, SetAttestationIdsResponse],
 )
 PerformOpResponse = [
     error_code: ErrorCode,
