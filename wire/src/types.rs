@@ -24,8 +24,8 @@ pub struct KeySizeInBits(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, AsCborValue)]
 pub struct RsaExponent(pub u64);
 
-/// Maximum supported size for CBOR-serialized messages.
-pub const MAX_SIZE: usize = 4096;
+/// Default maximum supported size for CBOR-serialized messages.
+pub const DEFAULT_MAX_SIZE: usize = 4096;
 
 /// Marker type indicating failure to convert into an `enum` variant.
 #[derive(Debug)]
@@ -326,10 +326,10 @@ pub struct SetHalInfoResponse {}
 // Boot loader->TA at start of day.
 #[derive(Debug, AsCborValue)]
 pub struct SetBootInfoRequest {
-    pub verified_boot_key: [u8; 32],
+    pub verified_boot_key: Vec<u8>,
     pub device_boot_locked: bool,
     pub verified_boot_state: i32,
-    pub verified_boot_hash: [u8; 32],
+    pub verified_boot_hash: Vec<u8>,
     pub boot_patchlevel: u32, // YYYYMMDD format
 }
 #[derive(Debug, AsCborValue)]

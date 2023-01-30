@@ -36,6 +36,11 @@ pub const DEFAULT_CERT_SUBJECT: &[u8] = &[
     0x20, 0x4b, 0x65, 0x79, // "Android Keystore Key"
 ];
 
+/// Constants to indicate whether or not to include/expect more messages when splitting and then
+/// assembling the large responses sent from the TA to the HAL.
+pub const NEXT_MESSAGE_SIGNAL_TRUE: u8 = 0b00000001u8;
+pub const NEXT_MESSAGE_SIGNAL_FALSE: u8 = 0b00000000u8;
+
 /// Possible verified boot state values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, N, AsCborValue)]
 pub enum VerifiedBootState {
@@ -57,10 +62,10 @@ impl TryFrom<i32> for VerifiedBootState {
 /// Field order is fixed, to match the CBOR type definition of `RootOfTrust` in `IKeyMintDevice`.
 #[derive(Clone, Debug, AsCborValue, PartialEq, Eq)]
 pub struct BootInfo {
-    pub verified_boot_key: [u8; 32],
+    pub verified_boot_key: Vec<u8>,
     pub device_boot_locked: bool,
     pub verified_boot_state: VerifiedBootState,
-    pub verified_boot_hash: [u8; 32],
+    pub verified_boot_hash: Vec<u8>,
     pub boot_patchlevel: u32, // YYYYMMDD format
 }
 
