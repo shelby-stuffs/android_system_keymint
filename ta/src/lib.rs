@@ -21,8 +21,10 @@ use kmr_wire::{
     coset::TaggedCborSerializable,
     keymint::{
         Digest, ErrorCode, HardwareAuthToken, KeyCharacteristics, KeyMintHardwareInfo, KeyOrigin,
-        KeyParam, SecurityLevel, VerifiedBootState,
+        KeyParam, SecurityLevel, VerifiedBootState, NEXT_MESSAGE_SIGNAL_FALSE,
+        NEXT_MESSAGE_SIGNAL_TRUE,
     },
+    rpc,
     rpc::{EekCurve, IRPC_V2, IRPC_V3},
     secureclock::{TimeStampToken, Timestamp},
     sharedsecret::SharedSecretParameters,
@@ -139,6 +141,43 @@ pub struct KeyMintTa<'a> {
 
     /// Operation handle of the (single) in-flight operation that requires trusted user presence.
     presence_required_op: Option<OpHandle>,
+}
+
+/// A helper method that can be used by the TA for processing the responses to be sent to the
+/// HAL service. Splits large response messages into multiple parts based on the capacity of the
+/// channel from the TA to the HAL. One element in the returned response array consists of:
+/// <next_msg_signal + response data> where next_msg_signal is a byte whose value is 1 if there are
+/// more messages in the response array following this one. This signal should be used by the HAL
+/// side to decide whether or not to wait for more messages. Implementation of this method must be
+/// in sync with its counterpart in the `kmr-hal` crate.
+pub fn split_rsp(mut rsp_data: &[u8], max_size: usize) -> Result<Vec<Vec<u8>>, Error> {
+    if rsp_data.is_empty() || max_size < 2 {
+        return Err(km_err!(
+            InvalidArgument,
+            "response data is empty or max size: {} is invalid",
+            max_size
+        ));
+    }
+    // Need to allocate one byte for the more_msg_signal.
+    let allowed_msg_length = max_size - 1;
+    let mut num_of_splits = rsp_data.len() / allowed_msg_length;
+    if rsp_data.len() % allowed_msg_length > 0 {
+        num_of_splits += 1;
+    }
+    let mut split_rsp = vec_try_with_capacity!(num_of_splits)?;
+    while rsp_data.len() > allowed_msg_length {
+        let mut rsp = vec_try_with_capacity!(allowed_msg_length + 1)?;
+        rsp.push(NEXT_MESSAGE_SIGNAL_TRUE);
+        rsp.extend_from_slice(&rsp_data[..allowed_msg_length]);
+        debug!("Current response size with signalling byte: {}", rsp.len());
+        split_rsp.push(rsp);
+        rsp_data = &rsp_data[allowed_msg_length..];
+    }
+    let mut last_rsp = vec_try_with_capacity!(rsp_data.len() + 1)?;
+    last_rsp.push(NEXT_MESSAGE_SIGNAL_FALSE);
+    last_rsp.extend_from_slice(rsp_data);
+    split_rsp.push(last_rsp);
+    Ok(split_rsp)
 }
 
 /// Device lock state
@@ -483,10 +522,10 @@ impl<'a> KeyMintTa<'a> {
         } else {
             info!("Setting boot_info to {:?}", boot_info);
             let rot_info = RootOfTrustInfo {
-                verified_boot_key: boot_info.verified_boot_key,
+                verified_boot_key: boot_info.verified_boot_key.clone(),
                 device_boot_locked: boot_info.device_boot_locked,
                 verified_boot_state: boot_info.verified_boot_state,
-                verified_boot_hash: boot_info.verified_boot_hash,
+                verified_boot_hash: boot_info.verified_boot_hash.clone(),
             };
             self.boot_info = Some(boot_info);
             self.rot_data =
@@ -495,6 +534,12 @@ impl<'a> KeyMintTa<'a> {
                 })?);
         }
         Ok(())
+    }
+
+    /// Check if HAL-derived information has been set. This is used as an
+    /// indication that we are past the boot stage.
+    pub fn is_hal_info_set(&self) -> bool {
+        self.hal_info.is_some()
     }
 
     /// Configure the HAL-derived information, learnt from the userspace
@@ -543,7 +588,7 @@ impl<'a> KeyMintTa<'a> {
         if self.dice_info.borrow().is_none() {
             // DICE info is not populated, but we have a trait method that
             // may provide them.
-            match self.dev.rpc.get_dice_info(false) {
+            match self.dev.rpc.get_dice_info(rpc::TestMode(false)) {
                 Ok(dice_info) => *self.dice_info.borrow_mut() = Some(Rc::new(dice_info)),
                 Err(e) => error!("Failed to retrieve DICE info: {:?}", e),
             }
@@ -817,7 +862,7 @@ impl<'a> KeyMintTa<'a> {
                 Err(e) => op_error_rsp(GetRpcHardwareInfoRequest::CODE, e),
             },
             PerformOpReq::RpcGenerateEcdsaP256KeyPair(req) => {
-                match self.generate_ecdsa_p256_keypair(req.test_mode) {
+                match self.generate_ecdsa_p256_keypair(rpc::TestMode(req.test_mode)) {
                     Ok((pubkey, ret)) => op_ok_rsp(PerformOpRsp::RpcGenerateEcdsaP256KeyPair(
                         GenerateEcdsaP256KeyPairResponse { maced_public_key: pubkey, ret },
                     )),
@@ -826,7 +871,7 @@ impl<'a> KeyMintTa<'a> {
             }
             PerformOpReq::RpcGenerateCertificateRequest(req) => {
                 match self.generate_cert_req(
-                    req.test_mode,
+                    rpc::TestMode(req.test_mode),
                     req.keys_to_sign,
                     &req.endpoint_encryption_cert_chain,
                     &req.challenge,
@@ -924,8 +969,16 @@ impl<'a> KeyMintTa<'a> {
                 }
             }
         } else {
-            error!("failed to parse keyblob, ignoring");
+            // We might have failed to parse the keyblob because it is in some prior format.
+            if let Some(old_key) = self.dev.legacy_key.as_mut() {
+                if let Err(e) = old_key.delete_legacy_key(keyblob) {
+                    error!("failed to parse keyblob as legacy, ignoring");
+                }
+            } else {
+                error!("failed to parse keyblob, ignoring");
+            }
         }
+
         Ok(())
     }
 
