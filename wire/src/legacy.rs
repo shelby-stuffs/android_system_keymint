@@ -58,6 +58,13 @@ pub const TRUSTY_STOP_BITMASK: u32 = 0x02;
 /// enum value.
 pub const TRUSTY_CMD_SHIFT: usize = 2;
 
+/// Legacy serialized trusty messages have as a first element the desired command encoded on a `u32`
+pub const CMD_SIZE: usize = 4;
+/// After the command, non-secure port responses have an error code encoded on a `u32`
+pub const ERROR_CODE_SIZE: usize = 4;
+/// Non-secure channel response headers are comprised of a CMD and an Error code
+pub const LEGACY_NON_SEC_RSP_HEADER_SIZE: usize = CMD_SIZE + ERROR_CODE_SIZE;
+
 /// Key{Mint,master} version identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, N)]
 #[repr(i32)]
@@ -165,7 +172,7 @@ fn serialize_trusty_response_message<T: TrustySerialize>(
     // mark this as the final response.
     let raw_cmd = cmd << TRUSTY_CMD_SHIFT | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
     let mut buf = Vec::new();
-    buf.try_reserve(4 + 4).map_err(|_e| Error::AllocationFailed)?;
+    buf.try_reserve(LEGACY_NON_SEC_RSP_HEADER_SIZE).map_err(|_e| Error::AllocationFailed)?;
     buf.extend_from_slice(&raw_cmd.to_ne_bytes());
 
     match result {
@@ -186,9 +193,51 @@ pub fn serialize_trusty_rsp(rsp: TrustyPerformOpRsp) -> Result<Vec<u8>, Error> {
     serialize_trusty_response_message(LegacyResult::Ok(rsp))
 }
 
+/// Serialize raw data as a Trusty response message without length prefix.
+fn serialize_trusty_raw_rsp(cmd: u32, raw_data: &[u8]) -> Result<Vec<u8>, Error> {
+    let raw_cmd = cmd << TRUSTY_CMD_SHIFT | TRUSTY_RESPONSE_BITMASK | TRUSTY_STOP_BITMASK;
+    let mut buf = Vec::new();
+    buf.try_reserve(CMD_SIZE + raw_data.len()).map_err(|_e| Error::AllocationFailed)?;
+    buf.extend_from_slice(&raw_cmd.to_ne_bytes());
+    buf.extend_from_slice(raw_data);
+    Ok(buf)
+}
+
 /// Serialize a legacy Trusty response message for the secure port.
 pub fn serialize_trusty_secure_rsp(rsp: TrustyPerformSecureOpRsp) -> Result<Vec<u8>, Error> {
-    serialize_trusty_response_message(LegacyResult::Ok(rsp))
+    match &rsp {
+        TrustyPerformSecureOpRsp::GetAuthTokenKey(GetAuthTokenKeyResponse { key_material }) => {
+            // The `KM_GET_AUTH_TOKEN_KEY` response does not include the error code value.  (The
+            // recipient has to distinguish between OK and error responses by the size of the
+            // response message: 4+32 for OK, 4+4 for error).
+            serialize_trusty_raw_rsp(rsp.raw_code(), key_material)
+        }
+        TrustyPerformSecureOpRsp::GetDeviceInfo(GetDeviceInfoResponse { device_ids }) => {
+            // The `KM_GET_DEVICE_INFO` response does not include the error code value. (The
+            // recipient has to distinguish between OK and error response by attempting to parse
+            // the response data as a CBOR map, and if this fails assume that the response hold
+            // an error code instead).
+            // TODO: update this to include explicit error code information if/when the C++ code
+            // and library are updated.
+            serialize_trusty_raw_rsp(rsp.raw_code(), device_ids)
+        }
+        TrustyPerformSecureOpRsp::SetAttestationIds(_) => {
+            serialize_trusty_response_message(LegacyResult::Ok(rsp))
+        }
+    }
+}
+
+/// Deserialize the header of a non-secure channel Trusty response message to know if the operation
+/// succeeded. The Result is the error code of the operation, which is roughly equivalent to the
+/// legacy keymaster error. Notice that if the keymint operation was successful the return error
+/// code will be `ErrorCode::Ok`.
+pub fn deserialize_trusty_rsp_error_code(rsp: &[u8]) -> Result<ErrorCode, Error> {
+    if rsp.len() < LEGACY_NON_SEC_RSP_HEADER_SIZE {
+        return Err(Error::DataTruncated);
+    }
+
+    let (error_code, _) = u32::deserialize(&rsp[CMD_SIZE..LEGACY_NON_SEC_RSP_HEADER_SIZE])?;
+    ErrorCode::try_from(error_code as i32).map_err(|_e| Error::InvalidEnumValue(error_code))
 }
 
 /// Serialize a legacy Trusty error response for the non-secure port.
@@ -385,6 +434,28 @@ impl InnerSerialize for GetAuthTokenKeyResponse {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, LegacySerialize)]
+pub struct GetDeviceInfoRequest {}
+#[derive(Clone, PartialEq, Eq, ZeroizeOnDrop)]
+pub struct GetDeviceInfoResponse {
+    // Device ID information encoded as a CBOR map.
+    pub device_ids: Vec<u8>,
+}
+
+/// The serialization of a `GET_DEVICE_INFO` response does not include a length field before the
+/// contents, so the auto-derive implementation can't be used. (This also means that `deserialize()`
+/// can't be implemented, because there is no length information available.)
+impl InnerSerialize for GetDeviceInfoResponse {
+    fn deserialize(_data: &[u8]) -> Result<(Self, &[u8]), Error> {
+        Err(Error::UnexpectedResponse)
+    }
+    fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
+        buf.try_reserve(self.device_ids.len()).map_err(|_e| Error::AllocationFailed)?;
+        buf.extend_from_slice(&self.device_ids);
+        Ok(())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, LegacySerialize)]
 pub struct SetBootParamsRequest {
     pub os_version: u32,
     pub os_patchlevel: u32, // YYYYMM
@@ -518,6 +589,8 @@ declare_req_rsp_enums! { TrustyKeymasterOperation => (TrustyPerformOpReq, Trusty
 // Possible legacy Trusty Keymaster operation requests for the secure port.
 declare_req_rsp_enums! { TrustyKeymasterSecureOperation  => (TrustyPerformSecureOpReq, TrustyPerformSecureOpRsp) {
     GetAuthTokenKey = 0 =>                                  (GetAuthTokenKeyRequest, GetAuthTokenKeyResponse),
+    GetDeviceInfo = 1 =>                                    (GetDeviceInfoRequest, GetDeviceInfoResponse),
+    SetAttestationIds = 0xc000 =>                           (SetAttestationIdsRequest, SetAttestationIdsResponse),
 } }
 
 /// Indicate whether a request message is a bootloader message.
@@ -631,7 +704,7 @@ mod tests {
             key_material: vec![1, 2, 3],
         });
         #[cfg(target_endian = "little")]
-        let data = concat!("03000000", "00000000", "010203");
+        let data = concat!("03000000", "010203");
         #[cfg(target_endian = "big")]
         let data = concat!("00000003", "010203");
 
