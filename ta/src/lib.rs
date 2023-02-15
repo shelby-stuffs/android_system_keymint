@@ -12,7 +12,7 @@ use core::mem::size_of;
 use core::{cell::RefCell, convert::TryFrom};
 use device::DiceInfo;
 use kmr_common::{
-    crypto::{self, RawKeyMaterial},
+    crypto::{self, hmac, RawKeyMaterial},
     get_bool_tag_value,
     keyblob::{self, RootOfTrustInfo, SecureDeletionSlot},
     km_err, tag, vec_try, vec_try_with_capacity, Error, FallibleAllocExt,
@@ -35,7 +35,7 @@ mod clock;
 pub mod device;
 mod keys;
 mod operation;
-mod rkp;
+pub mod rkp;
 mod secret;
 
 use keys::KeyImport;
@@ -111,7 +111,8 @@ pub struct KeyMintTa<'a> {
     // requests (CSR) and the algorithm used to sign the CSR for IRemotelyProvisionedComponent
     // (IRPC) HAL. Fixed for a device. Retrieved on first use.
     //
-    // Note: This information is cached only in the implementations of IRPC HAL V3 and above.
+    // Note: This information is cached only in the implementations of IRPC HAL V3 and
+    // IRPC HAL V2 in production mode.
     dice_info: RefCell<Option<Rc<DiceInfo>>>,
 
     /// Whether the device is still in early-boot.
@@ -256,6 +257,14 @@ impl<'a> KeyMintTa<'a> {
             attestation_chain_info: RefCell::new(BTreeMap::new()),
             attestation_id_info: RefCell::new(None),
             dice_info: RefCell::new(None),
+        }
+    }
+
+    /// Returns key used to sign auth tokens
+    pub fn get_hmac_key(&self) -> Option<hmac::Key> {
+        match &self.device_hmac {
+            Some(device_hmac) => device_hmac.get_hmac_key(),
+            None => None,
         }
     }
 
@@ -531,10 +540,6 @@ impl<'a> KeyMintTa<'a> {
 
     /// Retrieve the DICE info for the device, if available.
     fn get_dice_info(&self) -> Option<Rc<DiceInfo>> {
-        // DICE info is cached only for IRPC V3 and above.
-        if self.rpc_info.get_version() < IRPC_V3 {
-            return None;
-        }
         if self.dice_info.borrow().is_none() {
             // DICE info is not populated, but we have a trait method that
             // may provide them.
