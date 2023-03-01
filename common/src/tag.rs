@@ -867,6 +867,26 @@ fn reject_tags(params: &[KeyParam], exclude: &[Tag]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Return an error if non-None padding found.
+fn reject_some_padding(params: &[KeyParam]) -> Result<(), Error> {
+    if let Some(padding) = get_opt_tag_value!(params, Padding)? {
+        if *padding != PaddingMode::None {
+            return Err(km_err!(InvalidTag, "padding {:?} not allowed", padding));
+        }
+    }
+    Ok(())
+}
+
+/// Return an error if non-None digest found.
+fn reject_some_digest(params: &[KeyParam]) -> Result<(), Error> {
+    if let Some(digest) = get_opt_tag_value!(params, Digest)? {
+        if *digest != Digest::None {
+            return Err(km_err!(InvalidTag, "digest {:?} not allowed", digest));
+        }
+    }
+    Ok(())
+}
+
 /// Reject incompatible combinations of authentication tags.
 fn reject_incompatible_auth(params: &[KeyParam]) -> Result<(), Error> {
     let mut seen_user_secure_id = false;
@@ -1033,11 +1053,17 @@ fn check_begin_rsa_params(
     purpose: KeyPurpose,
     params: &[KeyParam],
 ) -> Result<(), Error> {
-    reject_tags(params, &[Tag::BlockMode])?;
     let padding = get_padding_mode(params)?;
     let mut digest = None;
     if for_signing(purpose) || (for_encryption(purpose) && padding == PaddingMode::RsaOaep) {
         digest = Some(get_digest(params)?);
+    }
+    if for_signing(purpose) && padding == PaddingMode::None && digest != Some(Digest::None) {
+        return Err(km_err!(
+            IncompatibleDigest,
+            "unpadded RSA sign requires Digest::None not {:?}",
+            digest
+        ));
     }
     match padding {
         PaddingMode::None => {}
@@ -1102,13 +1128,15 @@ fn check_begin_ec_params(
     purpose: KeyPurpose,
     params: &[KeyParam],
 ) -> Result<(), Error> {
-    reject_tags(params, &[Tag::BlockMode])?;
     let curve = get_ec_curve(chars)?;
     if purpose == KeyPurpose::Sign {
         let digest = get_digest(params)?;
+        if digest == Digest::Md5 {
+            return Err(km_err!(UnsupportedDigest, "Digest::MD5 unsupported for EC signing"));
+        }
         if curve == EcCurve::Curve25519 && digest != Digest::None {
             return Err(km_err!(
-                IncompatibleDigest,
+                UnsupportedDigest,
                 "Ed25519 only supports Digest::None not {:?}",
                 digest
             ));
@@ -1124,7 +1152,8 @@ fn check_begin_aes_params(
     params: &[KeyParam],
     caller_nonce: Option<&[u8]>,
 ) -> Result<(), Error> {
-    reject_tags(params, &[Tag::Digest, Tag::RsaOaepMgfDigest])?;
+    reject_tags(params, &[Tag::RsaOaepMgfDigest])?;
+    reject_some_digest(params)?;
     let bmode = get_block_mode(params)?;
     let padding = get_padding_mode(params)?;
 
@@ -1187,18 +1216,15 @@ fn check_begin_aes_params(
 /// Check that a 3-DES operation with the given `purpose` and `params` can validly be started
 /// using a key with characteristics `chars`.
 fn check_begin_3des_params(params: &[KeyParam], caller_nonce: Option<&[u8]>) -> Result<(), Error> {
-    reject_tags(params, &[Tag::Digest, Tag::RsaOaepMgfDigest])?;
+    reject_tags(params, &[Tag::RsaOaepMgfDigest])?;
+    reject_some_digest(params)?;
     let bmode = get_block_mode(params)?;
     let _padding = get_padding_mode(params)?;
 
     match bmode {
         BlockMode::Cbc | BlockMode::Ecb => {}
         _ => {
-            return Err(km_err!(
-                IncompatibleBlockMode,
-                "block mode {:?} not valid for 3-DES",
-                bmode
-            ))
+            return Err(km_err!(UnsupportedBlockMode, "block mode {:?} not valid for 3-DES", bmode))
         }
     }
 
@@ -1225,7 +1251,8 @@ fn check_begin_hmac_params(
     purpose: KeyPurpose,
     params: &[KeyParam],
 ) -> Result<(), Error> {
-    reject_tags(params, &[Tag::BlockMode, Tag::Padding, Tag::RsaOaepMgfDigest])?;
+    reject_tags(params, &[Tag::BlockMode, Tag::RsaOaepMgfDigest])?;
+    reject_some_padding(params)?;
     let digest = get_digest(params)?;
     if purpose == KeyPurpose::Sign {
         let mac_len = get_tag_value!(params, MacLength, ErrorCode::MissingMacLength)?;
@@ -1322,4 +1349,46 @@ pub fn check_rsa_wrapping_key_params(
 
     let rsa_oaep_decrypt_mode = DecryptionMode::OaepPadding { msg_digest, mgf_digest: *mgf_digest };
     Ok(rsa_oaep_decrypt_mode)
+}
+
+/// Calculate the [Luhn checksum](https://en.wikipedia.org/wiki/Luhn_algorithm) of the given number.
+fn luhn_checksum(mut val: u64) -> u64 {
+    let mut ii = 0;
+    let mut sum_digits = 0;
+    while val != 0 {
+        let curr_digit = val % 10;
+        let multiplier = if ii % 2 == 0 { 2 } else { 1 };
+        let digit_multiplied = curr_digit * multiplier;
+        sum_digits += (digit_multiplied % 10) + (digit_multiplied / 10);
+        val /= 10;
+        ii += 1;
+    }
+    (10 - (sum_digits % 10)) % 10
+}
+
+/// Derive an IMEI value from a first IMEI value, by incrementing by one and re-calculating
+/// the Luhn checksum.  Return an empty vector on any failure.
+pub fn increment_imei(imei: &[u8]) -> Vec<u8> {
+    // Expect ASCII digits.
+    let imei: &str = match core::str::from_utf8(imei) {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("IMEI is not UTF-8");
+            return Vec::new();
+        }
+    };
+    let imei: u64 = match imei.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("IMEI is not numeric");
+            return Vec::new();
+        }
+    };
+
+    // Drop trailing checksum digit, increment, and restore checksum.
+    let imei2 = (imei / 10) + 1;
+    let imei2 = (imei2 * 10) + luhn_checksum(imei2);
+
+    // Convert back to bytes.
+    alloc::format!("{}", imei2).into_bytes()
 }

@@ -36,6 +36,11 @@ pub const DEFAULT_CERT_SUBJECT: &[u8] = &[
     0x20, 0x4b, 0x65, 0x79, // "Android Keystore Key"
 ];
 
+/// Constants to indicate whether or not to include/expect more messages when splitting and then
+/// assembling the large responses sent from the TA to the HAL.
+pub const NEXT_MESSAGE_SIGNAL_TRUE: u8 = 0b00000001u8;
+pub const NEXT_MESSAGE_SIGNAL_FALSE: u8 = 0b00000000u8;
+
 /// Possible verified boot state values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, N, AsCborValue)]
 pub enum VerifiedBootState {
@@ -57,10 +62,10 @@ impl TryFrom<i32> for VerifiedBootState {
 /// Field order is fixed, to match the CBOR type definition of `RootOfTrust` in `IKeyMintDevice`.
 #[derive(Clone, Debug, AsCborValue, PartialEq, Eq)]
 pub struct BootInfo {
-    pub verified_boot_key: [u8; 32],
+    pub verified_boot_key: Vec<u8>,
     pub device_boot_locked: bool,
     pub verified_boot_state: VerifiedBootState,
-    pub verified_boot_hash: [u8; 32],
+    pub verified_boot_hash: Vec<u8>,
     pub boot_patchlevel: u32, // YYYYMMDD format
 }
 
@@ -359,6 +364,7 @@ pub enum KeyParam {
     AttestationIdProduct(Vec<u8>),
     AttestationIdSerial(Vec<u8>),
     AttestationIdImei(Vec<u8>),
+    AttestationIdSecondImei(Vec<u8>),
     AttestationIdMeid(Vec<u8>),
     AttestationIdManufacturer(Vec<u8>),
     AttestationIdModel(Vec<u8>),
@@ -422,6 +428,7 @@ impl KeyParam {
             KeyParam::AttestationIdProduct(_) => Tag::AttestationIdProduct,
             KeyParam::AttestationIdSerial(_) => Tag::AttestationIdSerial,
             KeyParam::AttestationIdImei(_) => Tag::AttestationIdImei,
+            KeyParam::AttestationIdSecondImei(_) => Tag::AttestationIdSecondImei,
             KeyParam::AttestationIdMeid(_) => Tag::AttestationIdMeid,
             KeyParam::AttestationIdManufacturer(_) => Tag::AttestationIdManufacturer,
             KeyParam::AttestationIdModel(_) => Tag::AttestationIdModel,
@@ -552,6 +559,9 @@ impl crate::AsCborValue for KeyParam {
                 KeyParam::AttestationIdSerial(<Vec<u8>>::from_cbor_value(raw)?)
             }
             Tag::AttestationIdImei => KeyParam::AttestationIdImei(<Vec<u8>>::from_cbor_value(raw)?),
+            Tag::AttestationIdSecondImei => {
+                KeyParam::AttestationIdSecondImei(<Vec<u8>>::from_cbor_value(raw)?)
+            }
             Tag::AttestationIdMeid => KeyParam::AttestationIdMeid(<Vec<u8>>::from_cbor_value(raw)?),
             Tag::AttestationIdManufacturer => {
                 KeyParam::AttestationIdManufacturer(<Vec<u8>>::from_cbor_value(raw)?)
@@ -642,6 +652,9 @@ impl crate::AsCborValue for KeyParam {
             KeyParam::AttestationIdProduct(v) => (Tag::AttestationIdProduct, v.to_cbor_value()?),
             KeyParam::AttestationIdSerial(v) => (Tag::AttestationIdSerial, v.to_cbor_value()?),
             KeyParam::AttestationIdImei(v) => (Tag::AttestationIdImei, v.to_cbor_value()?),
+            KeyParam::AttestationIdSecondImei(v) => {
+                (Tag::AttestationIdSecondImei, v.to_cbor_value()?)
+            }
             KeyParam::AttestationIdMeid(v) => (Tag::AttestationIdMeid, v.to_cbor_value()?),
             KeyParam::AttestationIdManufacturer(v) => {
                 (Tag::AttestationIdManufacturer, v.to_cbor_value()?)
@@ -670,6 +683,7 @@ impl crate::AsCborValue for KeyParam {
     fn cddl_schema() -> Option<String> {
         Some(format!(
             "&(
+    [{}, {}], ; {}
     [{}, {}], ; {}
     [{}, {}], ; {}
     [{}, {}], ; {}
@@ -858,6 +872,9 @@ impl crate::AsCborValue for KeyParam {
             Tag::AttestationIdImei as i32,
             Vec::<u8>::cddl_ref(),
             "Tag_AttestationIdImei",
+            Tag::AttestationIdSecondImei as i32,
+            Vec::<u8>::cddl_ref(),
+            "Tag_AttestationIdSecondImei",
             Tag::AttestationIdMeid as i32,
             Vec::<u8>::cddl_ref(),
             "Tag_AttestationIdMeid",
@@ -1022,6 +1039,7 @@ pub enum Tag {
     DeviceUniqueAttestation = 1879048912,
     IdentityCredentialKey = 1879048913,
     StorageKey = 1879048914,
+    AttestationIdSecondImei = -1879047469,
     AssociatedData = -1879047192,
     Nonce = -1879047191,
     MacLength = 805307371,

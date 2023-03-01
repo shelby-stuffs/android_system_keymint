@@ -2,36 +2,33 @@
 
 use super::KeyMintTa;
 use crate::coset::{
-    cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseKeyBuilder, CoseMac0,
-    CoseMac0Builder, CoseSign1Builder, HeaderBuilder, Label,
+    cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseMac0, CoseMac0Builder,
+    HeaderBuilder, Label,
 };
-use crate::device::CsrSigningAlgorithm;
 use crate::RpcInfo;
 use alloc::string::{String, ToString};
 use alloc::{vec, vec::Vec};
-use der::{asn1::OctetString, Decode};
 use kmr_common::crypto::{
     ec::{CoseKeyPurpose, RKP_TEST_KEY_CBOR_MARKER},
     hmac_sha256, KeyMaterial,
 };
 use kmr_common::{keyblob, km_err, rpc_err, try_to_vec, Error, FallibleAllocExt};
-use kmr_wire::read_to_value;
-use kmr_wire::rpc::{AUTH_REQ_SCHEMA_V1, CERT_TYPE_KEYMINT, IRPC_V2, IRPC_V3};
 use kmr_wire::{
     cbor,
     cbor::cbor,
     keymint::{
-        Algorithm, DateTime, Digest, EcCurve, KeyCreationResult, KeyParam, KeyPurpose,
-        SecurityLevel, VerifiedBootState,
+        Algorithm, DateTime, Digest, EcCurve, KeyParam, KeyPurpose, SecurityLevel,
+        VerifiedBootState,
     },
+    read_to_value, rpc,
     rpc::{
         DeviceInfo, EekCurve, HardwareInfo, MacedPublicKey, ProtectedData,
         MINIMUM_SUPPORTED_KEYS_IN_CSR,
     },
+    rpc::{AUTH_REQ_SCHEMA_V1, CERT_TYPE_KEYMINT, IRPC_V2, IRPC_V3},
     types::KeySizeInBits,
     CborError,
 };
-use x509_cert::Certificate;
 
 const RPC_P256_KEYGEN_PARAMS: [KeyParam; 8] = [
     KeyParam::Purpose(KeyPurpose::AttestKey),
@@ -45,7 +42,7 @@ const RPC_P256_KEYGEN_PARAMS: [KeyParam; 8] = [
 ];
 
 impl<'a> KeyMintTa<'a> {
-    pub(crate) fn rpc_device_info(&self) -> Result<Vec<u8>, Error> {
+    pub fn rpc_device_info(&self) -> Result<Vec<u8>, Error> {
         let info = self.rpc_device_info_cbor()?;
         serialize_cbor(&info)
     }
@@ -133,7 +130,7 @@ impl<'a> KeyMintTa<'a> {
 
     pub(crate) fn generate_ecdsa_p256_keypair(
         &mut self,
-        mut test_mode: bool,
+        test_mode: rpc::TestMode,
     ) -> Result<(MacedPublicKey, Vec<u8>), Error> {
         let (key_material, chars) = self.generate_key_material(&RPC_P256_KEYGEN_PARAMS)?;
 
@@ -152,10 +149,10 @@ impl<'a> KeyMintTa<'a> {
         let maced_pub_key =
             build_maced_pub_key(pub_cose_key_encoded, |data| -> Result<Vec<u8>, Error> {
                 // In test mode, use an all-zero HMAC key.
-                if test_mode {
+                if test_mode == rpc::TestMode(true) {
                     return hmac_sha256(self.imp.hmac, &[0; 32], data);
                 }
-                self.dev.rpc.compute_hmac_sha256(self.imp.hmac, data)
+                self.dev.rpc.compute_hmac_sha256(self.imp.hmac, self.imp.hkdf, data)
             })?;
 
         let key_result = self.finish_keyblob_creation(
@@ -171,7 +168,7 @@ impl<'a> KeyMintTa<'a> {
 
     pub(crate) fn generate_cert_req(
         &self,
-        _test_mode: bool,
+        _test_mode: rpc::TestMode,
         _keys_to_sign: Vec<MacedPublicKey>,
         _eek_chain: &[u8],
         _challenge: &[u8],
@@ -221,7 +218,8 @@ impl<'a> KeyMintTa<'a> {
             }
 
             cose_mac0.verify_tag(&[], |expected_tag, data| -> Result<(), Error> {
-                let computed_tag = self.dev.rpc.compute_hmac_sha256(self.imp.hmac, data)?;
+                let computed_tag =
+                    self.dev.rpc.compute_hmac_sha256(self.imp.hmac, self.imp.hkdf, data)?;
                 if self.imp.compare.eq(expected_tag, &computed_tag) {
                     Ok(())
                 } else {
@@ -242,26 +240,21 @@ impl<'a> KeyMintTa<'a> {
         let signed_data_payload =
             cbor!([Value::Bytes(challenge.to_vec()), Value::Bytes(csr_payload_data)])?;
         let signed_data_payload_data = serialize_cbor(&signed_data_payload)?;
-        // Process DICE info retrieved via the device interface.
+
+        // Process DICE info.
         let dice_info =
             self.get_dice_info().ok_or_else(|| rpc_err!(Failed, "DICE info not available."))?;
-        let cose_sign_algorithm = match &dice_info.signing_algorithm {
-            CsrSigningAlgorithm::ES256 => iana::Algorithm::ES256,
-            CsrSigningAlgorithm::EdDSA => iana::Algorithm::EdDSA,
-        };
         let uds_certs = read_to_value(&dice_info.pub_dice_artifacts.uds_certs)?;
         let dice_cert_chain = read_to_value(&dice_info.pub_dice_artifacts.dice_cert_chain)?;
 
-        // Construct `SignedData`
-        let protected = HeaderBuilder::new().algorithm(cose_sign_algorithm).build();
-        let signed_data = CoseSign1Builder::new()
-            .protected(protected)
-            .payload(signed_data_payload_data)
-            .try_create_signature(&[], |input| -> Result<Vec<u8>, Error> {
-                self.dev.rpc.sign_data(self.imp.ec, input, None)
-            })?
-            .build();
-        let signed_data_cbor = signed_data.to_cbor_value().map_err(CborError::from)?;
+        // Get `SignedData`
+        let signed_data_cbor = read_to_value(&self.dev.rpc.sign_data_in_cose_sign1(
+            self.imp.ec,
+            &dice_info.signing_algorithm,
+            &signed_data_payload_data,
+            &[],
+            None,
+        )?)?;
 
         // Construct `AuthenticatedRequest<CsrPayload>`
         let authn_req = cbor!([
