@@ -268,6 +268,21 @@ pub trait InnerSerialize: Sized {
     fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error>;
 }
 
+impl InnerSerialize for u64 {
+    fn deserialize(data: &[u8]) -> Result<(Self, &[u8]), Error> {
+        if data.len() < 8 {
+            return Err(Error::DataTruncated);
+        }
+        let int_data: [u8; 8] = data[..8].try_into().map_err(|_e| Error::DataTruncated)?;
+        Ok((<u64>::from_ne_bytes(int_data), &data[8..]))
+    }
+    fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), Error> {
+        buf.try_reserve(8).map_err(|_e| Error::AllocationFailed)?;
+        buf.extend_from_slice(&self.to_ne_bytes());
+        Ok(())
+    }
+}
+
 impl InnerSerialize for u32 {
     fn deserialize(data: &[u8]) -> Result<(Self, &[u8]), Error> {
         if data.len() < 4 {
@@ -409,6 +424,14 @@ pub struct SetAttestationIdsRequest {
 }
 #[derive(Clone, PartialEq, Eq, Debug, LegacySerialize)]
 pub struct SetAttestationIdsResponse {}
+
+#[derive(Clone, PartialEq, Eq, LegacySerialize, ZeroizeOnDrop)]
+pub struct SetAttestationIdsKM3Request {
+    pub base: SetAttestationIdsRequest,
+    pub second_imei: Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Debug, LegacySerialize)]
+pub struct SetAttestationIdsKM3Response {}
 
 // Legacy messages of interest from `trusty_keymaster_messages.h`.
 
@@ -583,6 +606,7 @@ declare_req_rsp_enums! { TrustyKeymasterOperation => (TrustyPerformOpReq, Trusty
     ClearAttestationCertChain = 0xa000 =>            (ClearAttestationCertChainRequest, ClearAttestationCertChainResponse),
     SetWrappedAttestationKey = 0xb000 =>             (SetWrappedAttestationKeyRequest, SetWrappedAttestationKeyResponse),
     SetAttestationIds = 0xc000 =>                    (SetAttestationIdsRequest, SetAttestationIdsResponse),
+    SetAttestationIdsKM3 = 0xc001 =>                 (SetAttestationIdsKM3Request, SetAttestationIdsKM3Response),
     ConfigureBootPatchlevel = 0xd0000 =>             (ConfigureBootPatchlevelRequest, ConfigureBootPatchlevelResponse),
 } }
 
