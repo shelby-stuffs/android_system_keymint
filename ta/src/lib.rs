@@ -9,7 +9,7 @@ use core::mem::size_of;
 use core::{cell::RefCell, convert::TryFrom};
 use device::DiceInfo;
 use kmr_common::{
-    crypto::{self, hmac, RawKeyMaterial},
+    crypto::{self, hmac, OpaqueOr},
     get_bool_tag_value,
     keyblob::{self, RootOfTrustInfo, SecureDeletionSlot},
     km_err, tag, vec_try, vec_try_with_capacity, Error, FallibleAllocExt,
@@ -44,7 +44,7 @@ use operation::{OpHandle, Operation};
 mod tests;
 
 /// Maximum number of parallel operations supported when running as TEE.
-const MAX_TEE_OPERATIONS: usize = 32;
+const MAX_TEE_OPERATIONS: usize = 16;
 
 /// Maximum number of parallel operations supported when running as StrongBox.
 const MAX_STRONGBOX_OPERATIONS: usize = 4;
@@ -1120,7 +1120,7 @@ impl<'a> KeyMintTa<'a> {
     }
 
     /// Return the root key used for key encryption.
-    fn root_kek(&self, context: &[u8]) -> Result<RawKeyMaterial, Error> {
+    fn root_kek(&self, context: &[u8]) -> Result<OpaqueOr<hmac::Key>, Error> {
         self.dev.keys.root_kek(context)
     }
 
