@@ -601,12 +601,15 @@ declare_req_rsp_enums! { TrustyKeymasterOperation => (TrustyPerformOpReq, Trusty
     GetVersion = 7 =>                                (GetVersionRequest, GetVersionResponse),
     GetVersion2 = 28 =>                              (GetVersion2Request, GetVersion2Response),
     SetBootParams = 0x1000 =>                        (SetBootParamsRequest, SetBootParamsResponse),
+
+    // Provisioning-related requests. Changes here should be reflected in `is_trusty_provisioning_{code,req}`.
     SetAttestationKey = 0x2000 =>                    (SetAttestationKeyRequest, SetAttestationKeyResponse),
     AppendAttestationCertChain = 0x3000 =>           (AppendAttestationCertChainRequest, AppendAttestationCertChainResponse),
     ClearAttestationCertChain = 0xa000 =>            (ClearAttestationCertChainRequest, ClearAttestationCertChainResponse),
     SetWrappedAttestationKey = 0xb000 =>             (SetWrappedAttestationKeyRequest, SetWrappedAttestationKeyResponse),
     SetAttestationIds = 0xc000 =>                    (SetAttestationIdsRequest, SetAttestationIdsResponse),
     SetAttestationIdsKM3 = 0xc001 =>                 (SetAttestationIdsKM3Request, SetAttestationIdsKM3Response),
+
     ConfigureBootPatchlevel = 0xd0000 =>             (ConfigureBootPatchlevelRequest, ConfigureBootPatchlevelResponse),
 } }
 
@@ -643,6 +646,7 @@ pub fn is_trusty_provisioning_code(code: u32) -> bool {
             | Some(TrustyKeymasterOperation::ClearAttestationCertChain)
             | Some(TrustyKeymasterOperation::SetWrappedAttestationKey)
             | Some(TrustyKeymasterOperation::SetAttestationIds)
+            | Some(TrustyKeymasterOperation::SetAttestationIdsKM3)
     )
 }
 
@@ -655,6 +659,7 @@ pub fn is_trusty_provisioning_req(req: &TrustyPerformOpReq) -> bool {
             | TrustyPerformOpReq::ClearAttestationCertChain(_)
             | TrustyPerformOpReq::SetWrappedAttestationKey(_)
             | TrustyPerformOpReq::SetAttestationIds(_)
+            | TrustyPerformOpReq::SetAttestationIdsKM3(_)
     )
 }
 
